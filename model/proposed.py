@@ -1,339 +1,300 @@
-# model/proposed.py
 import numpy as np
-import tensorflow as tf
-
-from tensorflow.keras.models import Model, Sequential
-from tensorflow.keras.layers import (
-    Input,
-    Dense,
-    Dropout,
-    Add,
-    Concatenate,
-    Multiply,
-    Flatten,
-    Layer,
-    Lambda,
-    LayerNormalization,
-    MultiHeadAttention,
-)
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
-
-class GateComplement(Layer):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-
-    def call(self, inputs):
-        return 1.0 - inputs
-
-    def get_config(self):
-        config = super().get_config()
-        return config
-
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+import os
+import copy
 
 # ============================================================
-# 1) Blocks
+# 1) PyTorch Dataset & DataLoader
 # ============================================================
 
-def point_wise_feed_forward_network(d_model: int, dff: int) -> Sequential:
-    """Transformer-style FFN."""
-    return Sequential(
-        [
-            Dense(dff, activation="linear"),
-            Dense(d_model),
-        ],
-        name="PWFFN",
-    )
+class MultimodalDataset(Dataset):
+    def __init__(self, df):
+        """
+        Expects df columns: 'text_central', 'img_central', 'text_peripheral', 'image_peripheral', 'label'
+        """
+        # 1. Convert columns to numpy arrays and then tensors
+        # stack is important to turn array of arrays into a 2D matrix
+        self.bert = torch.tensor(np.stack(df['text_central'].values), dtype=torch.float32)
+        self.vgg = torch.tensor(np.stack(df['img_central'].values), dtype=torch.float32)
+        
+        self.text_per = torch.tensor(np.stack(df['text_peripheral'].values), dtype=torch.float32)
+        self.img_per = torch.tensor(np.stack(df['image_peripheral'].values), dtype=torch.float32)
+        
+        self.labels = torch.tensor(df['label'].values, dtype=torch.float32)
 
+    def __len__(self):
+        return len(self.labels)
 
-class CoAttentionBlock(Layer):
-    """
-    Co-Attention Block:
-    - (optional) expand dims to [B, 1, D]
-    - MultiHeadAttention(query=text, key/value=image)
-    - Residual + LayerNorm
-    - FFN + Residual + LayerNorm
-    - Flatten to [B, D]
-    """
+    def __getitem__(self, idx):
+        # Return a dictionary of inputs and the label
+        inputs = {
+            'bert_input': self.bert[idx],
+            'vgg16_input': self.vgg[idx],
+            'text_peripheral_input': self.text_per[idx],
+            'image_peripheral_input': self.img_per[idx]
+        }
+        return inputs, self.labels[idx]
 
-    def __init__(
-        self,
-        num_heads: int,
-        d_model: int,
-        key_dim: int,
-        dff: int,
-        dropout_rate: float = 0.1,
-        epsilon: float = 1e-6,
-        expand_dims: bool = True,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-        self.expand_dims = expand_dims
-
-        self.mha = MultiHeadAttention(
-            num_heads=num_heads,
-            key_dim=key_dim,
-            value_dim=key_dim,
-            name=f"{self.name}_MHA" if self.name else "CoAtt_MHA",
-        )
-        self.dropout = Dropout(dropout_rate)
-        self.add = Add()
-        self.ln = LayerNormalization(epsilon=epsilon)
-
-        self.ffn = point_wise_feed_forward_network(d_model=d_model, dff=dff)
-        self.flatten = Flatten()
-
-    def call(self, inputs, training=None):
-        text_input, image_input = inputs
-
-        if self.expand_dims:
-            text_input = tf.expand_dims(text_input, axis=1)
-            image_input = tf.expand_dims(image_input, axis=1)
-
-        # Co-attention: query=text, key/value=image
-        attn = self.mha(query=text_input, value=image_input, key=image_input, training=training)
-        attn = self.dropout(attn, training=training)
-        attn = self.add([attn, text_input])
-        attn = self.ln(attn)
-
-        # FFN
-        ffn_out = self.ffn(attn, training=training)
-        ffn_out = self.dropout(ffn_out, training=training)
-        ffn_out = self.add([ffn_out, attn])
-        ffn_out = self.ln(ffn_out)
-
-        return self.flatten(ffn_out)
-
-
-# ============================================================
-# 2) Proposed Model (Multimodal RHP variant)
-# ============================================================
-
-def RHP(
-    feature_dimension: int,
-    num_heads: int,
-    dropout: float = 0.1,
-    learning_rate: float = 1e-4,
-    key_dim: int = 64,
-    dff: int = 2048,
-) -> Model:
-    """
-    Convenience wrapper.
-    """
-    return build_rhp(
-        feature_dimension=feature_dimension,
-        num_heads=num_heads,
-        dropout=dropout,
-        learning_rate=learning_rate,
-        key_dim=key_dim,
-        dff=dff,
-    )
-
-
-def build_rhp(
-    feature_dimension: int,
-    num_heads: int,
-    dropout: float = 0.1,
-    learning_rate: float = 1e-4,
-    key_dim: int = 64,
-    dff: int = 2048,
-) -> Model:
-
-    # -----------------------------
-    # Input layer
-    # -----------------------------
-    bert_input = Input(shape=(768,), name="bert_input")
-    vgg16_input = Input(shape=(4096,), name="vgg16_input")
-    text_per_input = Input(shape=(4,), name="text_peripheral_input")
-    image_per_input = Input(shape=(4,), name="image_peripheral_input")
-
-    # -----------------------------
-    # Local / Global Layer
-    # -----------------------------
-    bert = LayerNormalization(axis=-1, epsilon=1e-6, name="LN_bert")(bert_input)
-    bert = Dense(feature_dimension, activation="relu", name="Dense_Layer_bert")(bert)
-    bert = Dropout(dropout, name="Dropout_bert")(bert)
-
-    vgg16 = LayerNormalization(axis=-1, epsilon=1e-6, name="LN_vgg16")(vgg16_input)
-    vgg16 = Dense(feature_dimension, activation="relu", name="Dense_Layer_vgg16")(vgg16)
-    vgg16 = Dropout(dropout, name="Dropout_vgg16")(vgg16)
-
-    # Text Peripheral
-    text_per = Dense(4, activation="elu", name="Dense_text_per_1")(text_per_input)
-    text_per = Dense(16, activation="elu", name="Dense_text_per_2")(text_per)
-    text_per = Dense(64, activation="elu", name="Dense_text_per_3")(text_per)
-    text_per = Dense(256, activation="elu", name="Dense_text_per_4")(text_per)
-    text_per = Dense(feature_dimension, activation="elu", name="Dense_text_per_proj")(text_per)
-    text_per = LayerNormalization(axis=-1, epsilon=1e-6, name="LN_text_per")(text_per)
-
-    # Image Peripheral
-    image_per = Dense(4, activation="elu", name="Dense_image_per_1")(image_per_input)
-    image_per = Dense(16, activation="elu", name="Dense_image_per_2")(image_per)
-    image_per = Dense(64, activation="elu", name="Dense_image_per_3")(image_per)
-    image_per = Dense(256, activation="elu", name="Dense_image_per_4")(image_per)
-    image_per = Dense(feature_dimension, activation="elu", name="Dense_image_per_proj")(image_per)
-    image_per = LayerNormalization(axis=-1, epsilon=1e-6, name="LN_image_per")(image_per)
-
-    # -----------------------------
-    # Co-Attention (two blocks)
-    # -----------------------------
-    co_att_text_block = CoAttentionBlock(
-        num_heads=num_heads,
-        d_model=feature_dimension,
-        key_dim=key_dim,
-        dff=dff,
-        dropout_rate=dropout,
-        name="CoAtt_Text",
-    )
-    co_att_image_block = CoAttentionBlock(
-        num_heads=num_heads,
-        d_model=feature_dimension,
-        key_dim=key_dim,
-        dff=dff,
-        dropout_rate=dropout,
-        name="CoAtt_Image",
-    )
-
-    co_attention_text = co_att_text_block((bert, text_per))
-    co_attention_image = co_att_image_block((vgg16, image_per))
-
-    # -----------------------------
-    # Feature Fusion (gate)
-    # -----------------------------
-    text_tanh = Dense(feature_dimension, activation="tanh", name="Text_Tanh")(co_attention_text)
-    image_tanh = Dense(feature_dimension, activation="tanh", name="Image_Tanh")(co_attention_image)
-
-    combined = Concatenate(name="Concat_text_image")([co_attention_text, co_attention_image])
-    gate = Dense(feature_dimension, activation="sigmoid", name="Gate_Text_Image")(combined)
-
-    gated_text = Multiply(name="Gated_Text")([gate, text_tanh])
-    # NOTE: (1 - gate) 연산은 텐서 연산으로 처리
-    gate_comp = GateComplement(name="Gate_Complement")(gate)
-
-    gated_image = Multiply(name="Gated_Image")(
-        [gate_comp, image_tanh]
-    )
-
-
-    fused = Add(name="Text_Image_Fusion")([gated_text, gated_image])
-
-    # -----------------------------
-    # Helpfulness Prediction Layer
-    # -----------------------------
-    dense_1 = Dense(64, activation="linear", name="Dense_layer_1")(fused)
-    dense_2 = Dense(32, activation="linear", name="Dense_layer_2")(dense_1)
-    dense_3 = Dense(16, activation="linear", name="Dense_layer_3")(dense_2)
-    output_layer = Dense(1, activation="linear", name="Output_layer")(dense_3)
-
-    model = Model(
-        inputs=[bert_input, vgg16_input, text_per_input, image_per_input],
-        outputs=output_layer,
-        name="RHP_Multimodal",
-    )
-
-    model.compile(
-        optimizer=Adam(learning_rate=learning_rate),
-        loss="mean_squared_error",
-        metrics=["mean_absolute_error", "mean_squared_error"],
-    )
-
-    return model
-
-
-# ============================================================
-# 3) tf.data.Dataset: get_data_loader
-# ============================================================
-
-def get_data_loader(args: dict, df, shuffle: bool = True):
-    """
-    df columns expected:
-      - 'bert' (list/np.array shape [768])
-      - 'vgg16' (list/np.array shape [4096])
-      - 'text_peripheral' (list/np.array shape [4])
-      - 'image_peripheral' (list/np.array shape [4])
-      - 'log_vote' (float)
-    """
-
-    # numpy arrays
-    bert_arr = np.stack(df["bert"].to_list()).astype("float32")
-    vgg_arr = np.stack(df["vgg16"].to_list()).astype("float32")
-
-    # 이 컬럼들은 종종 (1,4) 형태로 들어있어서 stack으로 맞추는 게 안전
-    text_per_arr = np.stack(df["text_peripheral"].to_list()).astype("float32").reshape(-1, 4)
-    image_per_arr = np.stack(df["image_peripheral"].to_list()).astype("float32").reshape(-1, 4)
-
-    labels = df["log_vote"].to_numpy().astype("float32")
-
-    x_dict = {
-        "bert_input": bert_arr,
-        "vgg16_input": vgg_arr,
-        "text_peripheral_input": text_per_arr,
-        "image_peripheral_input": image_per_arr,
-    }
-
+def get_data_loader(args: dict, df: pd.DataFrame, shuffle: bool = True):
+    dataset = MultimodalDataset(df)
     batch_size = int(args.get("batch_size", 128))
-    seed = int(args.get("seed", 42))
+    
+    loader = DataLoader(
+        dataset, 
+        batch_size=batch_size, 
+        shuffle=shuffle,
+        num_workers=0, 
+        pin_memory=True if torch.cuda.is_available() else False
+    )
+    return loader
 
-    ds = tf.data.Dataset.from_tensor_slices((x_dict, labels))
 
-    if shuffle:
-        ds = ds.shuffle(buffer_size=len(df), seed=seed)
+# ============================================================
+# 2) Model Components (Blocks)
+# ============================================================
 
-    ds = ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
-    return ds
+class CoAttentionBlock(nn.Module):
+    def __init__(self, embed_dim, num_heads, dff, dropout=0.1):
+        super(CoAttentionBlock, self).__init__()
+        
+        # MultiHead Attention
+        self.mha = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
+        
+        self.ln1 = nn.LayerNorm(embed_dim)
+        self.ln2 = nn.LayerNorm(embed_dim)
+        self.dropout = nn.Dropout(dropout)
+        
+        # Point-wise Feed Forward Network
+        self.ffn = nn.Sequential(
+            nn.Linear(embed_dim, dff),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(dff, embed_dim)
+        )
+
+    def forward(self, query, key_value):
+        query_seq = query.unsqueeze(1)
+        key_value_seq = key_value.unsqueeze(1)
+        attn_output, _ = self.mha(query_seq, key_value_seq, key_value_seq)
+        out1 = self.ln1(query_seq + self.dropout(attn_output))
+        ffn_output = self.ffn(out1)
+        out2 = self.ln2(out1 + self.dropout(ffn_output))
+        
+        return out2.squeeze(1)
+
+
+# ============================================================
+# 3) Main Model (MCHPM)
+# ============================================================
+
+class MCHPM(nn.Module):
+    def __init__(self, 
+                 feature_dimension=256, 
+                 num_heads=4, 
+                 dropout=0.1, 
+                 dff=2048):
+        super(MCHPM, self).__init__()
+        
+        # --- 1. Local / Global Projections ---
+        # BERT path
+        self.bert_ln = nn.LayerNorm(768)
+        self.bert_proj = nn.Sequential(
+            nn.Linear(768, feature_dimension),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
+        
+        # VGG path
+        self.vgg_ln = nn.LayerNorm(4096)
+        self.vgg_proj = nn.Sequential(
+            nn.Linear(4096, feature_dimension),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
+        
+        # Text Peripheral Path
+        self.text_per_net = nn.Sequential(
+            nn.Linear(4, 4), nn.ELU(),
+            nn.Linear(4, 16), nn.ELU(),
+            nn.Linear(16, 64), nn.ELU(),
+            nn.Linear(64, 256), nn.ELU(),
+            nn.Linear(256, feature_dimension), nn.ELU(),
+            nn.LayerNorm(feature_dimension)
+        )
+        
+        # Image Peripheral Path
+        self.img_per_net = nn.Sequential(
+            nn.Linear(4, 4), nn.ELU(),
+            nn.Linear(4, 16), nn.ELU(),
+            nn.Linear(16, 64), nn.ELU(),
+            nn.Linear(64, 256), nn.ELU(),
+            nn.Linear(256, feature_dimension), nn.ELU(),
+            nn.LayerNorm(feature_dimension)
+        )
+        
+        # --- 2. Co-Attention Layers ---
+        self.co_att_text = CoAttentionBlock(feature_dimension, num_heads, dff, dropout)
+        self.co_att_image = CoAttentionBlock(feature_dimension, num_heads, dff, dropout)
+        
+        # --- 3. Gating Mechanism ---
+        self.text_tanh = nn.Sequential(nn.Linear(feature_dimension, feature_dimension), nn.Tanh())
+        self.image_tanh = nn.Sequential(nn.Linear(feature_dimension, feature_dimension), nn.Tanh())
+        
+        self.gate_layer = nn.Sequential(
+            nn.Linear(feature_dimension * 2, feature_dimension),
+            nn.Sigmoid()
+        )
+        
+        # --- 4. Prediction Head ---
+        self.regressor = nn.Sequential(
+            nn.Linear(feature_dimension, 64),
+            nn.ReLU(),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, 16),
+            nn.ReLU(),
+            nn.Linear(16, 1) # Output 1 score
+        )
+
+    def forward(self, inputs):
+        bert = inputs['bert_input']
+        vgg = inputs['vgg16_input']
+        text_per = inputs['text_peripheral_input']
+        img_per = inputs['image_peripheral_input']
+        
+        # 1. Embeddings & Projection
+        bert_feat = self.bert_proj(self.bert_ln(bert))
+        vgg_feat = self.vgg_proj(self.vgg_ln(vgg))
+        
+        t_per_feat = self.text_per_net(text_per)
+        i_per_feat = self.img_per_net(img_per)
+        
+        # 2. Combine Main + Peripheral (Feature Fusion Phase 1)
+        text_combined = bert_feat + t_per_feat
+        img_combined = vgg_feat + i_per_feat
+        
+        # 3. Co-Attention
+        feat_text_from_img = self.co_att_text(query=text_combined, key_value=img_combined)
+        feat_img_from_text = self.co_att_image(query=img_combined, key_value=text_combined)
+        
+        # 4. Gating (Feature Fusion Phase 2)
+        h_text = self.text_tanh(feat_text_from_img)
+        h_image = self.image_tanh(feat_img_from_text)
+        concat_feat = torch.cat([feat_text_from_img, feat_img_from_text], dim=1)
+        z = self.gate_layer(concat_feat) 
+        
+        gated_text = torch.mul(z, h_text)
+        gated_image = torch.mul(1.0 - z, h_image)
+        
+        fused = gated_text + gated_image
+        
+        # 5. Prediction
+        output = self.regressor(fused)
+        return output
+
+def RHP(feature_dimension, num_heads, dropout=0.1, learning_rate=1e-4, **kwargs):
+    model = MCHPM(feature_dimension, num_heads, dropout)
+    return model
 
 
 # ============================================================
 # 4) Trainer & Tester
 # ============================================================
 
-def rhp_trainer(
-    args: dict,
-    model: Model,
-    train_loader,
-    val_loader,
-    best_model_path: str,
-):
+def rhp_trainer(args, model, train_loader, val_loader, best_model_path):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[Trainer] Using device: {device}")
+    
+    model = model.to(device)
+    
+    # Optimizer & Loss
+    optimizer = optim.Adam(model.parameters(), lr=float(args.get("lr", 1e-4)))
+    criterion = nn.MSELoss()
+    
     epochs = int(args.get("num_epochs", 100))
-    patience = int(args.get("patience", 5))
+    patience = int(args.get("patience", 10))
+    
+    best_val_loss = float('inf')
+    counter = 0 # Early stopping counter
+    
+    for epoch in range(epochs):
+        # --- Training ---
+        model.train()
+        train_loss = 0.0
+        
+        for batch_idx, (inputs, labels) in enumerate(train_loader):
+            for k, v in inputs.items():
+                inputs[k] = v.to(device)
+            labels = labels.to(device).unsqueeze(1) # [Batch, 1]
+            
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+            
+            train_loss += loss.item()
+            
+        avg_train_loss = train_loss / len(train_loader)
+        
+        # --- Validation ---
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for inputs, labels in val_loader:
+                for k, v in inputs.items():
+                    inputs[k] = v.to(device)
+                labels = labels.to(device).unsqueeze(1)
+                
+                outputs = model(inputs)
+                loss = criterion(outputs, labels)
+                val_loss += loss.item()
+        
+        avg_val_loss = val_loss / len(val_loader)
+        
+        print(f"Epoch [{epoch+1}/{epochs}] Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
+        
+        # --- Early Stopping & Saving ---
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            counter = 0
+            torch.save(model.state_dict(), best_model_path)
+            print(f"   >>> Model saved! Improved val_loss: {best_val_loss:.4f}")
+        else:
+            counter += 1
+            print(f"   >>> No improvement. EarlyStopping counter: {counter}/{patience}")
+            if counter >= patience:
+                print("   >>> Early Stopping Triggered.")
+                break
+                
+    return None
 
-    callbacks = [
-        EarlyStopping(
-            monitor="val_loss",
-            patience=patience,
-            mode="auto",
-            restore_best_weights=True,
-            verbose=1,
-        ),
-        ModelCheckpoint(
-            filepath=best_model_path,
-            monitor="val_loss",
-            save_best_only=True,
-            save_weights_only=False,
-            verbose=1,
-        ),
-    ]
 
-    history = model.fit(
-        train_loader,
-        validation_data=val_loader,
-        epochs=epochs,
-        callbacks=callbacks,
-        verbose=1,
-    )
-    return history
-
-
-def rhp_tester(
-    args: dict,
-    model: Model,
-    test_loader,
-):
-    preds = model.predict(test_loader).reshape(-1)
-
+def rhp_tester(args, model, test_loader):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+    model.eval()
+    
+    preds_list = []
     trues_list = []
-    for _, y in test_loader:
-        trues_list.append(y.numpy())
-    trues = np.concatenate(trues_list, axis=0).reshape(-1)
-
+    
+    print("[Tester] Starting Inference...")
+    with torch.no_grad():
+        for inputs, labels in test_loader:
+            for k, v in inputs.items():
+                inputs[k] = v.to(device)
+            
+            outputs = model(inputs)
+            
+            # Move back to CPU for numpy conversion
+            preds_list.append(outputs.cpu().numpy())
+            trues_list.append(labels.numpy())
+            
+    preds = np.concatenate(preds_list).flatten()
+    trues = np.concatenate(trues_list).flatten()
+    
     return preds, trues

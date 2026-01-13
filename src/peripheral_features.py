@@ -1,209 +1,94 @@
-# src/feature/peripheral.py
-from __future__ import annotations
-
-from dataclasses import dataclass
-from typing import Iterable, List, Optional, Tuple, Union
-
+import os
+import cv2
 import numpy as np
 import pandas as pd
-import requests
-import concurrent.futures
-
-import cv2
+from tqdm import tqdm
 from textblob import TextBlob
 import textstat
-from tqdm import tqdm
-
-tqdm.pandas()
-
 
 # ============================================================
-# 1) Text Peripheral (sentiment, subjectivity, readability, extremity)
+# 1. Text Peripheral Features
 # ============================================================
-
-def analyze_text_peripheral(text: str) -> List[float]:
+def analyze_text_peripheral(text: str):
     """
-    Returns: [polarity, subjectivity, readability, extremity]
+    Extracts text peripheral cues:
+    1. Sentiment Polarity
+    2. Subjectivity
+    3. Readability (Flesch Reading Ease)
+    4. Extremity (Absolute Polarity)
     """
     if not isinstance(text, str) or not text.strip():
-        return [np.nan, np.nan, np.nan, np.nan]
-
+        return [0.0, 0.0, 0.0, 0.0]
+    
     blob = TextBlob(text)
     polarity = blob.sentiment.polarity
     subjectivity = blob.sentiment.subjectivity
-
+    
     try:
         readability = textstat.flesch_reading_ease(text)
-    except Exception:
-        readability = np.nan
-
+    except:
+        readability = 0.0
+        
     extremity = abs(polarity)
-    return [float(polarity), float(subjectivity), float(readability), float(extremity)]
-
-
-def add_text_peripheral_features(
-    df: pd.DataFrame,
-    text_col: str = "text",
-    output_col: str = "text_peripheral",
-) -> pd.DataFrame:
-    df = df.copy()
-    df[output_col] = df[text_col].progress_apply(analyze_text_peripheral)
-    return df
+    
+    return [polarity, subjectivity, readability, extremity]
 
 
 # ============================================================
-# 2) Image Peripheral (brightness, contrast, saturation, edge_intensity)
+# 2. Image Peripheral Features
 # ============================================================
-
-def _parse_urls(cell: Union[str, List[str]]) -> List[str]:
+def analyze_image_peripheral(img_path: str):
     """
-    Robust URL parser:
-    - list[str] 그대로 사용
-    - "url1', 'url2" 형태 / 콤마 구분 / 단일 url 모두 대응
+    Extracts image peripheral cues based on User's original logic:
+    1. Brightness (Mean of Grayscale)
+    2. Contrast (Std of Grayscale)
+    3. Saturation (Mean of S channel in HSV)
+    4. Edge Intensity (Mean of Canny edges)
     """
-    if isinstance(cell, list):
-        return [str(u).strip() for u in cell if isinstance(u, str) and u.strip()]
-
-    if not isinstance(cell, str):
-        return []
-
-    s = cell.strip()
-    if not s:
-        return []
-
-    if "', '" in s:
-        parts = [p.strip(" '\"") for p in s.split("', '")]
-        return [p for p in parts if p]
-    if "," in s and s.count("http") >= 2:
-        parts = [p.strip(" '\"") for p in s.split(",")]
-        return [p for p in parts if p]
-
-    return [s.strip(" '\"")]
-
-
-def _download_image_cv2(url: str, timeout: int = 5, headers: Optional[dict] = None) -> Optional[np.ndarray]:
+    # Return zeros if path is invalid
+    if not img_path or not os.path.exists(img_path):
+        return [0.0, 0.0, 0.0, 0.0]
+    
     try:
-        r = requests.get(url, timeout=timeout, headers=headers)
-        r.raise_for_status()
-        arr = np.asarray(bytearray(r.content), dtype=np.uint8)
-        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)  # BGR
-        return img
+        # 读取图片
+        img = cv2.imread(img_path)
+        if img is None:
+            return [0.0, 0.0, 0.0, 0.0]
+        
+        # 1. Brightness & 2. Contrast (Based on Grayscale)
+        gray_image = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        brightness = np.mean(gray_image) / 255.0  # Normalize to 0-1
+        contrast = gray_image.std() / 255.0       # Normalize to 0-1
+        
+        # 3. Saturation (Based on HSV S-channel)
+        hsv_image = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        saturation = hsv_image[:, :, 1]
+        avg_saturation = np.mean(saturation) / 255.0 # Normalize to 0-1
+        
+        # 4. Edge Intensity (Based on Canny)
+        edges = cv2.Canny(gray_image, 100, 200)
+        edge_intensity = np.mean(edges) / 255.0      # Normalize to 0-1
+        
+        return [brightness, contrast, avg_saturation, edge_intensity]
+    
     except Exception:
-        return None
+        return [0.0, 0.0, 0.0, 0.0]
 
 
-def _image_stats(img_bgr: np.ndarray) -> Tuple[float, float, float, float]:
-    """
-    Returns: brightness, contrast, avg_saturation, edge_intensity
-    """
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-
-    brightness = float(np.mean(gray))
-    contrast = float(gray.std())
-
-    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
-    saturation = hsv[:, :, 1]
-    avg_saturation = float(np.mean(saturation))
-
-    edges = cv2.Canny(gray, 100, 200)
-    edge_intensity = float(np.mean(edges))
-
-    return brightness, contrast, avg_saturation, edge_intensity
-
-
-def process_single_image(
-    url: str,
-    timeout: int = 5,
-    headers: Optional[dict] = None,
-) -> Optional[Tuple[float, float, float, float]]:
-    img = _download_image_cv2(url, timeout=timeout, headers=headers)
-    if img is None:
-        return None
-    return _image_stats(img)
-
-
-def process_images_peripheral(
-    urls_cell: Union[str, List[str]],
-    timeout: int = 5,
-    max_workers: int = 16,
-    max_images_per_row: Optional[int] = None,
-    headers: Optional[dict] = None,
-) -> List[float]:
-    """
-    여러 이미지가 있으면 평균으로 aggregate.
-    Returns: [avg_brightness, avg_contrast, avg_saturation, avg_edge_intensity]
-    """
-    urls = _parse_urls(urls_cell)
-    if not urls:
-        return [np.nan, np.nan, np.nan, np.nan]
-
-    if max_images_per_row is not None:
-        urls = urls[:max_images_per_row]
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        results = list(executor.map(lambda u: process_single_image(u, timeout=timeout, headers=headers), urls))
-
-    results = [r for r in results if r is not None]
-    if not results:
-        return [np.nan, np.nan, np.nan, np.nan]
-
-    arr = np.array(results, dtype="float32")  # (N, 4)
-    avg = np.mean(arr, axis=0)
-    return avg.tolist()
-
-
-def add_image_peripheral_features(
-    df: pd.DataFrame,
-    url_col: str = "large_image_url",
-    output_col: str = "image_peripheral",
-    timeout: int = 5,
-    max_workers: int = 16,
-    max_images_per_row: Optional[int] = None,
-    user_agent: str = "Mozilla/5.0",
-) -> pd.DataFrame:
+# ============================================================
+# 3. Pipeline Function
+# ============================================================
+def add_features(df: pd.DataFrame, text_col: str, path_col: str):
     df = df.copy()
-    headers = {"User-Agent": user_agent}
-
-    # progress bar를 위해 tqdm 사용
-    outputs = []
-    for cell in tqdm(df[url_col].tolist(), desc="Image Peripheral"):
-        outputs.append(
-            process_images_peripheral(
-                cell,
-                timeout=timeout,
-                max_workers=max_workers,
-                max_images_per_row=max_images_per_row,
-                headers=headers,
-            )
-        )
-    df[output_col] = outputs
-    return df
-
-
-# ============================================================
-# 3) Convenience pipeline
-# ============================================================
-
-def add_text_and_image_peripheral(
-    df: pd.DataFrame,
-    text_col: str = "text",
-    url_col: str = "large_image_url",
-    text_out: str = "text_peripheral",
-    img_out: str = "image_peripheral",
-    timeout: int = 5,
-    max_workers: int = 16,
-    max_images_per_row: Optional[int] = None,
-) -> pd.DataFrame:
-    """
-    원본 코드에서 하던 것처럼 두 컬럼을 한 번에 생성.
-    """
-    df = add_text_peripheral_features(df, text_col=text_col, output_col=text_out)
-    df = add_image_peripheral_features(
-        df,
-        url_col=url_col,
-        output_col=img_out,
-        timeout=timeout,
-        max_workers=max_workers,
-        max_images_per_row=max_images_per_row,
-    )
+    
+    # 1. Text
+    print("[Peripheral] Extracting Text Features...")
+    df[text_col] = df[text_col].fillna("").astype(str)
+    df['text_peripheral'] = df[text_col].apply(analyze_text_peripheral)
+    
+    # 2. Image (from local path)
+    print("[Peripheral] Extracting Image Features from local files...")
+    tqdm.pandas(desc="Image Peripheral")
+    df['image_peripheral'] = df[path_col].progress_apply(analyze_image_peripheral)
+    
     return df
