@@ -136,21 +136,21 @@ __marimo__/
 # 0. Ignore local-only docs (not for upload)
 CLAUDE.md
 
-# 1. Ignore Data Directory (Raw & Processed)
-data/
-data/raw/
-data/processed/
+# 1. Generated data — pipeline regenerates these; only the .gitkeep marker is tracked
+data/processed/*
+!data/processed/.gitkeep
+data/review_images/*
+!data/review_images/.gitkeep
 
-# 2. Ignore Downloaded Images (e.g. All_Beauty_images/)
-*_images/
-
-# 3. Ignore Saved Models (Large .pth / .keras files)
-saved_models/
+# 2. Saved Models (Large .pth / .keras files; only the .gitkeep marker is tracked)
+model/save/*
+!model/save/.gitkeep
 *.pth
 *.pt
 *.keras
 *.h5
 *.ckpt
+saved_models/
 
 # 4. Ignore VS Code & OS System Files
 .vscode/
