@@ -1,22 +1,24 @@
-seed: 42 
+seed: 42
 
 data:
-  # Base filename for the dataset (located in data/raw/)
-  # Example: if file is 'data/raw/dataSample.jsonl.gz', set fname: dataSample
-  fname: All_Beauty        
-  
-  # The column name representing the label (e.g., helpful_vote, vote, etc.)
-  label_col: helpful_vote  
+  fname: sample_Musical_Instruments
 
-  # Train/Val/Test split ratios
-  test_size: 0.2   # Use 20% of data for testing
-  val_size: 0.1    # Use 10% of data for validation
+  # Train / Test split ratio (val is carved from train in main.py at load time).
+  test_size: 0.2
 
 args:
-  device: cuda        # 'cuda' or 'cpu'
-  batch_size: 128     # Batch size
-  num_epochs: 100     # Maximum training epochs
-  optimizer: adam     # Optimizer type: adam / adamw / sgd / rmsprop
-  lr: 0.001           # Learning rate
-  dropout: 0.1        # Dropout rate
-  patience: 5         # EarlyStopping patience (stop if no improvement after 5 epochs)
+  device: cuda
+
+  # Training
+  batch_size: 128
+  num_epochs: 100
+  optimizer: adam
+  lr: 0.001
+  dropout: 0.1
+  patience: 5
+  val_ratio: 0.125          # fraction of train carved into val (0.125 of 80% = 10% of full)
+
+  # Model architecture
+  feature_dimension: 256
+  num_heads: 4
+  dff: 2048

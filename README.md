@@ -6,114 +6,111 @@ Official implementation of:
 _Electronic Commerce Research and Applications_, 76, 101586. [Paper](https://doi.org/10.1016/j.elerap.2026.101586)
 
 ## Overview
-This repository provides the official implementation of MCHPM (Multimodal Cue-based Helpfulness Prediction Model), a theory-driven deep learning framework for review helpfulness prediction in e-commerce. MCHPM is grounded in the Elaboration Likelihood Model and reflects how consumers evaluate online reviews through central and peripheral information-processing routes.
+This repository is the official implementation of MCHPM (Multimodal Cue-based Helpfulness Prediction Model), published in *Electronic Commerce Research and Applications* (2026).
 
-Existing MRHP (Multimodal Review Helpfulness Prediction) models primarily focus on deep semantic representations from text and images while overlooking shallow cues such as readability and image quality. To address this limitation, MCHPM systematically integrates central cues extracted via BERT and VGG-16 with peripheral cues computed from textual and visual surface features.
+Most multimodal review helpfulness prediction (MRHP) models rely on deep semantic representations of text and images and overlook surface-level cues such as readability, sentiment intensity, and image quality. MCHPM addresses this gap by drawing on the **Elaboration Likelihood Model (ELM)** from consumer psychology, which describes how readers process information through two parallel routes — a *central* route based on careful cognitive engagement, and a *peripheral* route based on superficial heuristics.
 
-A co-attention mechanism models the interdependencies between central and peripheral cues within each modality, and a Gated Multimodal Unit dynamically adjusts the relative importance of text and image representations during prediction. Experiments on large-scale Amazon datasets demonstrate that MCHPM consistently outperforms strong unimodal and multimodal baselines, achieving average improvements of 3.864% in MAE, 4.061% in MSE, 2.172% in RMSE, and 6.349% in MAPE. These results validate the effectiveness of theory-driven multimodal cue integration for review helpfulness prediction.
+For each modality (text and image), MCHPM extracts both **central cues** (deep semantic representations from BERT and VGG-16) and **peripheral cues** (surface-level features like readability and image clarity). Within each modality, central and peripheral cues are integrated through co-attention; the resulting text and image representations are then fused via a Gated Multimodal Unit (GMU) that adaptively weights the two modalities.
 
-## Requirements
-- python >= 3.9
-- torch == 2.3.1
-- torchvision == 0.18.1
-- tensorflow == 2.15.0
-- transformers == 4.28.1
-- tokenizers == 0.13.3
-- sentencepiece == 0.2.0
-- huggingface-hub == 0.23.4
-- nltk == 3.9.2
-- textblob == 0.19.0
-- textstat == 0.7.11
-- numpy == 1.26.4
-- pandas == 2.2.1
-- pyarrow == 12.0.1
-- scikit-learn == 1.4.2
-- opencv-python
-- Pillow == 10.3.0
-- tqdm == 4.66.4
-- PyYAML == 6.0.1
+The model predicts a continuous review-helpfulness score, defined as `log(1 + helpful_vote)`, as a regression target. Quantitative comparisons against unimodal and multimodal baselines on large-scale Amazon datasets are reported in [Experimental Results](#experimental-results).
 
 ## Repository Structure
-Below is the project structure for quick reference.
 
 ```bash
-├── data/                        # Dataset directory
-│   ├── raw/                     # Original (unprocessed) datasets
-│   └── processed/               # Preprocessed data for training and evaluation
+├── data/
+│   ├── raw/                        # Source datasets — place {fname}.jsonl.gz here
+│   ├── processed/                  # Pipeline parquet caches (labeled / cued / train / test)
+│   ├── review_images/              # Downloaded review images, grouped by dataset name
+│   └── mchpm_architecture.png
 │
-├── model/                       # MCHPM architecture and training pipeline
-│   └── proposed.py              # End-to-end MCHPM implementation
+├── model/
+│   ├── mchpm.py                    # MCHPM architecture, trainer, and tester
+│   └── save/                       # Best checkpoint per dataset (best.pth)
 │
-├── src/                         # Core source code
-│   ├── data.py                  # Data preprocessing and dataset loader
-│   ├── bert.py                  # Text central cue extraction using BERT
-│   ├── vgg16.py                 # Image central cue extraction using VGG-16
-│   ├── peripheral_features.py   # Peripheral cue extraction pipeline for text and images
-│   ├── image_manager.py         # Image downloading and path management utilities
-│   ├── config.yaml              # Model and training configuration file
-│   ├── path.py                  # Path and directory management utilities
-│   └── utils.py                 # Helper functions (metrics and logging)
+├── src/
+│   ├── config.yaml                 # Single source of truth for all hyperparameters
+│   ├── data_processing.py          # DataProcessor pipeline + DataLoader + peripheral standardizer
+│   ├── text_cue_extractor.py       # BERT central + TextBlob/textstat peripheral cues
+│   ├── image_cue_extractor.py      # VGG-16 central + OpenCV peripheral cues
+│   ├── review_image_downloader.py  # Parallel review image downloader (cache-aware)
+│   ├── text_processing.py          # Review text cleaning + English filter
+│   ├── path.py                     # Project path constants (auto-creates runtime folders)
+│   └── utils.py                    # Metrics, parquet/yaml/seed helpers
 │
-├── main.py                      # Entry point for model training and evaluation
-│
-├── requirements.txt             # Python package dependencies
-│
-├── README.md                    # Project documentation
-│
-└── .gitignore                   # Git ignore configuration
+├── main.py                         # Entry point: data preparation → train → test
+├── requirements.txt
+├── README.md
+└── .gitignore
 ```
 
 ## Model Description
 
-MCHPM (Multimodal Cue-based Helpfulness Prediction Model) is a theory-driven review helpfulness prediction framework designed to reflect consumers’ dual-route information processing mechanism. Grounded in the Elaboration Likelihood Model, MCHPM explicitly models both central cues (deep semantic and visual representations) and peripheral cues (surface-level textual and image-quality features) within a unified multimodal architecture.
-
-The model consists of three main modules:
-- **Multi-Cue Extraction Module:** Extracts central and peripheral cues from review text and images.
-- **Cue-Integration Module:** Models the interdependencies between central and peripheral cues within each modality.
-- **Multimodal Fusion Module:** Dynamically fuses textual and visual representations to predict review helpfulness.
-
-In the Multi-Cue Extraction module, textual central features are obtained from BERT, while visual central features are extracted from VGG-16. Peripheral cues, including sentiment, subjectivity, readability, extremity, brightness, contrast, saturation, and edge intensity, are computed using Python-based feature extraction. These cues represent shallow attributes that influence consumers’ evaluation processes.
-
-In the Cue-Integration module, a co-attention mechanism captures the interactions between textual and visual representations. This mechanism enables the model to learn how features from one modality inform and refine the representations of the other. Feed-forward layers and residual connections further stabilize and enhance feature learning.
-
-In the Multimodal Fusion module, a GMU (Gated Multimodal Fusion) mechanism dynamically adjusts the relative importance of text and image modalities. The fused representation is then passed to a multilayer perceptron for final helpfulness score prediction.
+MCHPM consists of three sequential modules. The full architecture is illustrated below.
 
 <p align="center">
-  <img src="data/MCHPM Architecture.png" alt="MCHPM Architecture" width="800">
+  <img src="data/mchpm_architecture.png" alt="MCHPM Architecture" width="800">
 </p>
+
+### 1. Multi-Cue Extraction Module
+Extracts central and peripheral cues from review text and images in parallel.
+
+**Central cues** (deep semantic representations):
+- Text: BERT `[CLS]` embedding — 768-dim (Eq. 1)
+- Image: VGG-16 `fc2` activation — 4096-dim (Eq. 3)
+
+**Peripheral cues** (surface-level features):
+- Text — polarity, subjectivity, readability, extremity (4-dim, Table 1)
+- Image — brightness, contrast, saturation, edge intensity (4-dim, Table 2)
+
+Implementation: [`src/text_cue_extractor.py`](src/text_cue_extractor.py), [`src/image_cue_extractor.py`](src/image_cue_extractor.py).
+
+### 2. Cue-Integration Module
+Within each modality, central and peripheral representations attend to each other through co-attention: central queries peripheral, peripheral queries central, and the two attended outputs are combined via element-wise multiplication (Eqs 7–12). The same pattern is applied independently to the text and image sides, yielding modality-specific integrated vectors `O_t` and `O_v`.
+
+Implementation: `CoAttentionBlock` in [`model/mchpm.py`](model/mchpm.py).
+
+### 3. Multimodal Fusion Module
+The integrated text and image vectors are passed through `tanh` projections, then fused by a Gated Multimodal Unit. A sigmoid gate `z`, computed from the concatenated representations, adaptively weights the contribution of each modality (Eqs 13–15). The fused vector is forwarded to an MLP regressor that outputs the predicted helpfulness score (Eq 16).
+
+Implementation: `MCHPM.gate_layer` and `MCHPM.regressor` in [`model/mchpm.py`](model/mchpm.py).
 
 ## How to Run
 
-### Environment Setup
-Create a virtual environment (Python ≥ 3.9 recommended) and install the required dependencies:
+### Configuration
+All hyperparameters live in [`src/config.yaml`](src/config.yaml) — it is the single source of truth. Defaults reproduce the paper experiments. Edit values (dataset name, batch size, learning rate, model dims, etc.) before running if you want to override.
 
-#### Option A: Using venv
-```bash
-python3.9 -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-```
+The `torch==2.3.1+cu121` / `torchvision==0.18.1+cu121` wheels pinned in [`requirements.txt`](requirements.txt) target an RTX 3080 Ti (CUDA 12.1, Ampere); for other GPUs or a CPU-only setup, follow the header comment in `requirements.txt`.
 
-#### Option B: Using Conda
+End-to-end run from a fresh checkout:
 ```bash
-conda create -n mchpm python=3.9
+conda create -n mchpm python=3.11
 conda activate mchpm
 pip install -r requirements.txt
+python main.py
 ```
 
 ### Data Preparation
-Place your dataset under `data/raw/` and ensure that its format matches the preprocessing pipeline defined in `src/data.py`.
+Place the dataset as `data/raw/{fname}.jsonl.gz` where `{fname}` matches `data.fname` in `config.yaml`.
 
-Preprocessed data will be stored under `data/processed/` after feature extraction.
+**Required columns in raw JSONL**:
+`user_id`, `parent_asin`, `timestamp`, `text`, `images`, `helpful_vote`, `verified_purchase`, `title`
+(`text`, `images`, `title` are renamed to `raw_review`, `review_images`, `review_title`)
 
-### Configuration
-Edit `src/config.yaml` to configure training, data paths, and model hyperparameters before running the experiment.
+Pipeline writes three cached parquets under `data/processed/`. Each stage requires the listed columns:
 
-### Train and Evaluate the Model
-Run the training and evaluation script:
-```bash
-python main.py
-```
+**`{fname}_labeled.parquet`** — after row filters, text cleaning, and label construction:
+`user_id`, `parent_asin`, `timestamp`, `review_date`, `raw_review`, `clean_review`, `review_images`, `review_title`, `helpful_vote`, `label`
+
+**`{fname}_cued.parquet`** — after image download and cue extraction:
+labeled columns + `review_image_paths`, `review_text_central`, `review_text_peripheral`, `review_image_central`, `review_image_peripheral`
+
+**`{fname}_train.parquet` / `{fname}_test.parquet`** — final shuffle split:
+cued columns (model consumes the four cue columns + `label`)
+
+To reuse externally-extracted BERT/VGG features, save the data as `{fname}_labeled.parquet` with `review_text_central` and/or `review_image_central` columns pre-populated. The pipeline will skip BERT/VGG and only compute peripheral cues.
+
+### Re-runs and caching
+On every call to `python main.py`, the pipeline auto-skips any cache layer already on disk (splits → cued → labeled → image folder), so subsequent runs reuse prior work. To force a stage to re-run, delete the corresponding parquet (or the `data/review_images/{fname}/` folder for image re-downloads).
 
 ## Experimental Results
 
