@@ -155,9 +155,14 @@ The results demonstrate that MCHPM consistently outperforms strong unimodal and 
         <td>0.687</td><td>0.831</td><td>0.912</td><td>56.032</td>
       </tr>
       <tr>
-        <td><b>MFRHP (Proposed)</b></td>
-        <td><b>0.625</b></td><td><b>0.695</b></td><td><b>0.837</b></td><td><b>53.116</b></td>
-        <td><b>0.695</b></td><td><b>0.840</b></td><td><b>0.916</b></td><td><b>57.488</b></td>
+        <td>MFRHP</td>
+        <td>0.625</td><td>0.695</td><td>0.837</td><td>53.116</td>
+        <td>0.695</td><td>0.840</td><td>0.916</td><td>57.488</td>
+      </tr>
+      <tr>
+        <td><b>MCHPM (Proposed)</b></td>
+        <td><b>0.607</b></td><td><b>0.679</b></td><td><b>0.824</b></td><td><b>50.706</b></td>
+        <td><b>0.674</b></td><td><b>0.825</b></td><td><b>0.908</b></td><td><b>53.712</b></td>
       </tr>
     </tbody>
   </table>
